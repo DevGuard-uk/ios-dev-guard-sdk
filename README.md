@@ -22,6 +22,12 @@ Add to your `Podfile`:
 pod 'DevGuardSDK', '~> 1.0'
 ```
 
+Until the pod is indexed on the CocoaPods trunk, install directly from this repository:
+
+```ruby
+pod 'DevGuardSDK', :git => 'https://github.com/DevGuard-uk/ios-dev-guard-sdk.git', :tag => 'v1.0.0'
+```
+
 Then run `pod install`.
 
 ## Quick start
