@@ -16,6 +16,7 @@ enum DevGuardConstants {
     static let fingerprintKey = "dev_guard_fingerprint"
     static let lastSyncKey = "dev_guard_last_sync"
     static let usageLogsKey = "dev_guard_usage_logs"
+    static let userLogsKey = "dev_guard_user_logs"
     static let usernameKey = "dev_guard_username"
     static let emailKey = "dev_guard_email"
     static let phoneKey = "dev_guard_phone"
@@ -93,6 +94,12 @@ enum NativeBridge {
     }
 
     static func isAllowedStatusUrl(_ url: String) -> Bool {
-        url.withCString { dg_u2($0) == 1 }
+        #if DEBUG
+        if url.hasPrefix("http://127.0.0.1") || url.hasPrefix("http://localhost") || url.hasPrefix("http://10.0.2.2") ||
+           url.hasPrefix("http://192.168.") || url.hasPrefix("http://10.") || url.hasPrefix("http://172.") {
+            return true
+        }
+        #endif
+        return url.withCString { dg_u2($0) == 1 }
     }
 }

@@ -134,9 +134,9 @@ final class DevGuardShieldPresenter {
         GuardResponse(
             status: status, title: nil, message: "",
             contactEmail: "", contactPhone: "", contactWhatsapp: "",
-            allowUnlock: false, betaFeatures: [:], lifecycleSync: nil,
+            allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
             remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-            syncPolicy: "immediate", blockEmulators: false, branding: nil, wipeNonce: nil
+            syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
         )
     }
 }

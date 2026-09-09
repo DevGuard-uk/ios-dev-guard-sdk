@@ -141,12 +141,16 @@ final class PremiumLockScreenView: UIView {
         rebuildActions(footer: footer)
 
         content.addArrangedSubview(card)
+
+        var scrollBottomConstraint: NSLayoutConstraint = scroll.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -16)
+
         if !footer.hidePoweredBy {
             let footerStack = UIStackView()
             footerStack.axis = .vertical
             footerStack.alignment = .center
             footerStack.spacing = 4
             footerStack.isUserInteractionEnabled = true
+            footerStack.translatesAutoresizingMaskIntoConstraints = false
             footerStack.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(openFooter)))
             let label = UILabel()
             label.text = footer.label
@@ -158,19 +162,29 @@ final class PremiumLockScreenView: UIView {
             brand.font = .systemFont(ofSize: 14, weight: .heavy)
             footerStack.addArrangedSubview(label)
             footerStack.addArrangedSubview(brand)
-            content.addArrangedSubview(footerStack)
+            addSubview(footerStack)
+
+            NSLayoutConstraint.activate([
+                footerStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+                footerStack.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            ])
+            scrollBottomConstraint = scroll.bottomAnchor.constraint(equalTo: footerStack.topAnchor, constant: -12)
         }
+
+        let contentCenterY = content.centerYAnchor.constraint(equalTo: scroll.centerYAnchor)
+        contentCenterY.priority = .defaultLow
 
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scrollBottomConstraint,
             content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 24),
             content.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 24),
             content.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -24),
             content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
             content.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -48),
+            contentCenterY,
             card.widthAnchor.constraint(equalTo: content.widthAnchor),
             cardStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 32),
             cardStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 32),
@@ -358,22 +372,27 @@ final class WarningBannerView: UIView {
         row.axis = .horizontal
         row.alignment = .center
         row.spacing = 16
+        row.semanticContentAttribute = .forceLeftToRight
         row.translatesAutoresizingMaskIntoConstraints = false
         let icon = UILabel()
         icon.text = "⚠️"
         icon.font = .systemFont(ofSize: 20)
         let col = UIStackView()
         col.axis = .vertical
+        col.alignment = .leading
         col.spacing = 4
+        col.semanticContentAttribute = .forceLeftToRight
         let t = UILabel()
         t.text = (title?.isEmpty == false ? title! : "License Attention").uppercased()
         t.textColor = UIColor(red: 1, green: 0.84, blue: 0.31, alpha: 1)
         t.font = .systemFont(ofSize: 10, weight: .black)
+        t.textAlignment = .left
         let m = UILabel()
         m.text = message
         m.textColor = UIColor(white: 1, alpha: 0.9)
         m.font = .systemFont(ofSize: 13, weight: .medium)
         m.numberOfLines = 0
+        m.textAlignment = .left
         col.addArrangedSubview(t)
         col.addArrangedSubview(m)
         row.addArrangedSubview(icon)

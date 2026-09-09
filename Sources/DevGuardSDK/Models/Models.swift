@@ -48,12 +48,14 @@ public struct GuardResponse {
     public let contactWhatsapp: String
     public let allowUnlock: Bool
     public let betaFeatures: [String: Any]
+    public let extraData: [String: Any]
     public let lifecycleSync: [String: Any]?
     public let remoteCommand: String?
     public let deviceToken: String?
     public let pingInterval: Int
     public let syncPolicy: String
     public let blockEmulators: Bool
+    public let diagnosticPasscodeHash: String?
     public let branding: LockScreenBranding?
     public let wipeNonce: Int?
 
@@ -67,12 +69,14 @@ public struct GuardResponse {
             contactWhatsapp: contactWhatsapp,
             allowUnlock: allowUnlock,
             betaFeatures: betaFeatures,
+            extraData: extraData,
             lifecycleSync: lifecycleSync,
             remoteCommand: remoteCommand,
             deviceToken: deviceToken,
             pingInterval: pingInterval,
             syncPolicy: syncPolicy,
             blockEmulators: blockEmulators,
+            diagnosticPasscodeHash: diagnosticPasscodeHash,
             branding: branding,
             wipeNonce: wipeNonce
         )
@@ -87,9 +91,11 @@ public struct GuardResponse {
             "contactWhatsapp": contactWhatsapp,
             "allowUnlock": allowUnlock,
             "betaFeatures": betaFeatures,
+            "extraData": extraData,
             "pingInterval": pingInterval,
             "syncPolicy": syncPolicy,
             "blockEmulators": blockEmulators,
+            "diagnosticPasscodeHash": diagnosticPasscodeHash as Any,
         ]
         if let title { dict["title"] = title }
         if let lifecycleSync { dict["lifecycleSync"] = lifecycleSync }
@@ -120,12 +126,14 @@ public struct GuardResponse {
             contactWhatsapp: dict["contactWhatsapp"] as? String ?? "",
             allowUnlock: dict["allowUnlock"] as? Bool ?? false,
             betaFeatures: dict["betaFeatures"] as? [String: Any] ?? [:],
+            extraData: dict["extraData"] as? [String: Any] ?? [:],
             lifecycleSync: dict["lifecycleSync"] as? [String: Any],
             remoteCommand: dict["remoteCommand"] as? String,
             deviceToken: dict["deviceToken"] as? String,
             pingInterval: max(ping, 1),
             syncPolicy: dict["syncPolicy"] as? String ?? "immediate",
             blockEmulators: dict["blockEmulators"] as? Bool ?? false,
+            diagnosticPasscodeHash: dict["diagnosticPasscodeHash"] as? String,
             branding: LockScreenBranding.fromDict(dict["branding"] as? [String: Any]),
             wipeNonce: (dict["wipeNonce"] as? NSNumber)?.intValue
         )
@@ -149,6 +157,7 @@ public struct DeviceMetadata {
     public let storage: String?
     public let networkType: String?
     public let usageLogs: [[String: Any]]?
+    public let userLogs: [[String: Any]]?
     public let deviceToken: String?
     public let fingerprint: String?
     public let sdkRuntime: String?
@@ -175,6 +184,7 @@ public struct DeviceMetadata {
         if let storage { map["storage"] = storage }
         if let networkType { map["networkType"] = networkType }
         if let usageLogs { map["usageLogs"] = usageLogs }
+        if let userLogs { map["userLogs"] = userLogs }
         if let deviceToken { map["deviceToken"] = deviceToken }
         if let fingerprint { map["fingerprint"] = fingerprint }
         if let sdkRuntime { map["sdkRuntime"] = sdkRuntime }

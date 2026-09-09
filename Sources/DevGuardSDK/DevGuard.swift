@@ -17,6 +17,7 @@ import UIKit
     private lazy var cacheService = CacheService(storage: storage, projectId: projectId)
     private lazy var tokenService = DeviceTokenService(storage: storage)
     private lazy var usageLogger = UsageLogger(storage: storage)
+    private lazy var userLogBuffer = UserLogBuffer(storage: storage)
     private lazy var syncPolicy = SyncPolicyService(storage: storage)
     private var restClient: RestClient?
 
@@ -70,6 +71,7 @@ import UIKit
                     storage: self.storage,
                     tokenService: self.tokenService,
                     usageLogger: self.usageLogger,
+                    userLogBuffer: self.userLogBuffer,
                     cachedResponse: self.currentResponse
                 )
                 return hardware.collect().toPayloadMap()
@@ -155,6 +157,18 @@ import UIKit
         Task { await syncStatus(forceLogs: true) }
     }
 
+    /// Records a User Journey UI step. Never throws; empty `screen` is ignored.
+    /// Uploaded on heartbeat/verify only when `betaFeatures.userJourney` is true.
+    @objc public func setUserLog(
+        screen: String,
+        widget: String? = nil,
+        className: String? = nil,
+        action: String = "view",
+        extras: [String: Any]? = nil
+    ) {
+        userLogBuffer.log(screen: screen, widget: widget, className: className, action: action, extras: extras)
+    }
+
     @objc public func verify() {
         Task { await syncStatus(force: true) }
     }
@@ -187,7 +201,7 @@ import UIKit
     private func backgroundInit() async {
         if previewModeLocked { return }
         let cache = CacheService(storage: storage, projectId: projectId)
-        let hardware = HardwareService(storage: storage, tokenService: tokenService, usageLogger: usageLogger, cachedResponse: currentResponse)
+        let hardware = HardwareService(storage: storage, tokenService: tokenService, usageLogger: usageLogger, userLogBuffer: userLogBuffer, cachedResponse: currentResponse)
 
         if hardware.isDeviceCompromised() {
             let code = NativeBridge.evaluatePolicy(blockEmulators: false, isPhysical: true, isCompromised: true)
@@ -197,9 +211,9 @@ import UIKit
                     title: "Security Alert",
                     message: "This device appears to be compromised. Access is restricted.",
                     contactEmail: "", contactPhone: "", contactWhatsapp: "",
-                    allowUnlock: false, betaFeatures: [:], lifecycleSync: nil,
+                    allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
                     remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                    syncPolicy: "immediate", blockEmulators: false, branding: nil, wipeNonce: nil
+                    syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
                 ))
                 return
             }
@@ -211,17 +225,17 @@ import UIKit
             updateResponse(GuardResponse(
                 status: .pending, title: nil, message: "Connecting to security server...",
                 contactEmail: "", contactPhone: "", contactWhatsapp: "",
-                allowUnlock: false, betaFeatures: [:], lifecycleSync: nil,
+                allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
                 remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                syncPolicy: "immediate", blockEmulators: false, branding: nil, wipeNonce: nil
+                syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
             ))
         } else {
             updateResponse(GuardResponse(
                 status: .active, title: nil, message: "",
                 contactEmail: "", contactPhone: "", contactWhatsapp: "",
-                allowUnlock: false, betaFeatures: [:], lifecycleSync: nil,
+                allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
                 remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                syncPolicy: "immediate", blockEmulators: false, branding: nil, wipeNonce: nil
+                syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
             ))
         }
 
@@ -237,8 +251,8 @@ import UIKit
             return
         }
 
-        let hardware = HardwareService(storage: storage, tokenService: tokenService, usageLogger: usageLogger, cachedResponse: currentResponse)
-        let metadata = hardware.collect(forceLogs: forceLogs)
+        let hardware = HardwareService(storage: storage, tokenService: tokenService, usageLogger: usageLogger, userLogBuffer: userLogBuffer, cachedResponse: currentResponse)
+        let metadata = hardware.collect(forceLogs: forceLogs, trigger: trigger)
         let compromised = hardware.isDeviceCompromised()
         let result = await restClient.fetchStatus(projectId: projectId, metadata: metadata)
 
@@ -252,9 +266,9 @@ import UIKit
                 status: .locked, title: "Security Alert",
                 message: "Server response could not be verified. Access restricted.",
                 contactEmail: "", contactPhone: "", contactWhatsapp: "",
-                allowUnlock: false, betaFeatures: [:], lifecycleSync: nil,
+                allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
                 remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                syncPolicy: "immediate", blockEmulators: false, branding: nil, wipeNonce: nil
+                syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
             ))
             return
         }
@@ -269,13 +283,16 @@ import UIKit
         syncPolicy.recordSuccessfulSync()
 
         if metadata.usageLogs?.isEmpty == false { usageLogger.clearLogs() }
+        if metadata.userLogs?.isEmpty == false { userLogBuffer.clearLogs() }
     }
 
     private func handleRemoteCommand(_ command: String?) async {
         guard let command, command != "none" else { return }
         switch command {
         case "syncLogs": await syncStatus(force: true, forceLogs: true)
-        case "clearLogs": usageLogger.clearLogs()
+        case "clearLogs":
+            usageLogger.clearLogs()
+            userLogBuffer.clearLogs()
         case "wipeCache": CacheService(storage: storage, projectId: projectId).clear()
         case "revokeToken": tokenService.clearToken()
         default: break
@@ -315,9 +332,10 @@ import UIKit
     private func updateResponse(_ response: GuardResponse?) {
         let previous = currentResponse
         currentResponse = response
-        handleBetaFeatures(previous: previous, response: response)
-        onStatusChanged?(response)
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.handleBetaFeatures(previous: previous, response: response)
+            self.onStatusChanged?(response)
             LockScreenPresenter.shared.render(response: response)
         }
     }
@@ -344,7 +362,7 @@ import UIKit
         let cache = CacheService(storage: storage, projectId: projectId)
         let last = cache.getLastWipeNonce()
         if let last, nonce <= last { return }
-        RemoteWipeService(cache: cache, usageLogger: usageLogger, storage: storage, tokenService: tokenService).execute()
+        RemoteWipeService(cache: cache, usageLogger: usageLogger, userLogBuffer: userLogBuffer, storage: storage, tokenService: tokenService).execute()
         cache.setLastWipeNonce(nonce)
     }
 

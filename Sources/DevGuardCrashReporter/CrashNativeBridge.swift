@@ -1,7 +1,7 @@
 import Foundation
 
 enum CrashReporterConstants {
-    static let defaultApiURL = "https://api.devguard.uk/devguard"
+    static let defaultApiURL = StatusUrlResolver.defaultApiURL
     static let hdrSig = "X-DevGuard-Signature"
     static let hdrTs = "X-DevGuard-Timestamp"
     static let hdrApiKey = "X-DevGuard-Api-Key"
@@ -14,6 +14,22 @@ enum CrashNativeBridge {
             dg_x9(ptr, timestamp, &output)
         }
         return String(cString: output)
+    }
+
+    static func defaultStatusUrl() -> String {
+        var output = [CChar](repeating: 0, count: 128)
+        dg_u1(&output)
+        return String(cString: output)
+    }
+
+    static func isAllowedStatusUrl(_ url: String) -> Bool {
+        #if DEBUG
+        if url.hasPrefix("http://127.0.0.1") || url.hasPrefix("http://localhost") || url.hasPrefix("http://10.0.2.2") ||
+           url.hasPrefix("http://192.168.") || url.hasPrefix("http://10.") || url.hasPrefix("http://172.") {
+            return true
+        }
+        #endif
+        return url.withCString { dg_u2($0) == 1 }
     }
 }
 

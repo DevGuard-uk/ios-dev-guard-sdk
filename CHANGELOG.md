@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **User Journey** (`DevGuard.shared.setUserLog`): optional compact UI-step trail for Developer Portal and Console. Uploaded on heartbeat only when the project plan includes User Journey.
+
 ## [1.0.0] - 2026-06-26
 
 ### Added

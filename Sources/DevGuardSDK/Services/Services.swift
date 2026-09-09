@@ -121,12 +121,14 @@ final class HardwareService {
     private let storage: SecureStorageService
     private let tokenService: DeviceTokenService
     private let usageLogger: UsageLogger
+    private let userLogBuffer: UserLogBuffer
     private let cachedResponse: GuardResponse?
 
-    init(storage: SecureStorageService, tokenService: DeviceTokenService, usageLogger: UsageLogger, cachedResponse: GuardResponse?) {
+    init(storage: SecureStorageService, tokenService: DeviceTokenService, usageLogger: UsageLogger, userLogBuffer: UserLogBuffer, cachedResponse: GuardResponse?) {
         self.storage = storage
         self.tokenService = tokenService
         self.usageLogger = usageLogger
+        self.userLogBuffer = userLogBuffer
         self.cachedResponse = cachedResponse
     }
 
@@ -134,11 +136,16 @@ final class HardwareService {
         cachedResponse?.betaFeatures["advancedTelemetry"] as? Bool == true
     }
 
+    var userJourneyEnabled: Bool {
+        cachedResponse?.betaFeatures["userJourney"] as? Bool == true
+    }
+
     static func quickResolveDeviceId() -> String {
         UIDevice.current.identifierForVendor?.uuidString ?? "unknown_ios"
     }
 
-    func collect(forceLogs: Bool = false) -> DeviceMetadata {
+    func collect(forceLogs: Bool = false, trigger: String? = nil) -> DeviceMetadata {
+        let isHeartbeat = trigger == "heartbeat" && !forceLogs
         let device = UIDevice.current
         let deviceId = Self.quickResolveDeviceId()
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
@@ -175,7 +182,8 @@ final class HardwareService {
             ram: advancedTelemetry ? "\(NativeBridge.getTotalRamMb()) MB" : nil,
             storage: nil,
             networkType: nil,
-            usageLogs: forceLogs ? usageLogger.getLogs() : nil,
+            usageLogs: (!isHeartbeat && forceLogs) ? usageLogger.getLogs() : nil,
+            userLogs: (!isHeartbeat && userJourneyEnabled) ? userLogBuffer.getLogs() : nil,
             deviceToken: tokenService.getToken(),
             fingerprint: tokenService.generateFingerprint(deviceId: deviceId, model: model, os: os),
             sdkRuntime: SdkIdentity.sdkRuntime,
@@ -186,8 +194,12 @@ final class HardwareService {
     }
 
     func isDeviceCompromised() -> Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
         let paths = ["/Applications/Cydia.app", "/Library/MobileSubstrate/MobileSubstrate.dylib", "/bin/bash", "/usr/sbin/sshd"]
         return paths.contains { FileManager.default.fileExists(atPath: $0) }
+        #endif
     }
 }
 
@@ -212,7 +224,22 @@ final class SyncPolicyService {
             }
             if !enabled { return false }
             let now = Date().timeIntervalSince1970
-            if now - lastLifecycleSync < 60 { return false }
+            var isLowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+            if !isLowPower {
+                let device = UIDevice.current
+                let prev = device.isBatteryMonitoringEnabled
+                device.isBatteryMonitoringEnabled = true
+                defer { device.isBatteryMonitoringEnabled = prev }
+                let level = device.batteryLevel
+                let state = device.batteryState
+                let discharging = state == .unplugged || state == .unknown
+                // batteryLevel is -1.0 when monitoring unavailable
+                if discharging && level >= 0 && level < 0.2 {
+                    isLowPower = true
+                }
+            }
+            let debounceWindow: TimeInterval = isLowPower ? 600 : 300
+            if now - lastLifecycleSync < 300 || (isLowPower && now - lastLifecycleSync < debounceWindow) { return false }
             lastLifecycleSync = now
             return true
         }
@@ -384,12 +411,14 @@ final class RestClient {
 final class RemoteWipeService {
     private let cache: CacheService
     private let usageLogger: UsageLogger
+    private let userLogBuffer: UserLogBuffer
     private let storage: SecureStorageService
     private let tokenService: DeviceTokenService
 
-    init(cache: CacheService, usageLogger: UsageLogger, storage: SecureStorageService, tokenService: DeviceTokenService) {
+    init(cache: CacheService, usageLogger: UsageLogger, userLogBuffer: UserLogBuffer, storage: SecureStorageService, tokenService: DeviceTokenService) {
         self.cache = cache
         self.usageLogger = usageLogger
+        self.userLogBuffer = userLogBuffer
         self.storage = storage
         self.tokenService = tokenService
     }
@@ -397,6 +426,7 @@ final class RemoteWipeService {
     func execute(revokeToken: Bool = false) {
         cache.clear()
         usageLogger.clearLogs()
+        userLogBuffer.clearLogs()
         storage.deleteAllDeviceUserKeys()
         if revokeToken { tokenService.clearToken() }
     }
