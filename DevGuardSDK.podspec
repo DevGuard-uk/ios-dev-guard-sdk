@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'DevGuardSDK'
-  s.version          = '1.0.0'
+  s.version          = '1.0.1'
   s.summary          = 'DevGuard native iOS SDK for license protection and security telemetry.'
   s.description      = 'Integrate DevGuard directly into Swift and Objective-C iOS applications.'
   s.homepage         = 'https://github.com/DevGuard-uk/ios-dev-guard-sdk'
