@@ -95,16 +95,23 @@ final class DeviceTokenService {
 
 final class UsageLogger {
     private let storage: SecureStorageService
+    private let outbox: DiagnosticOutbox?
     private let maxEvents = 100
-    init(storage: SecureStorageService) { self.storage = storage }
+
+    init(storage: SecureStorageService, outbox: DiagnosticOutbox? = nil) {
+        self.storage = storage
+        self.outbox = outbox
+    }
 
     func logEvent(_ type: String, data: [String: Any] = [:]) {
         var logs = getLogs()
-        logs.append(["type": type, "timestamp": Date().timeIntervalSince1970 * 1000, "data": data])
+        let payload: [String: Any] = ["type": type, "timestamp": Date().timeIntervalSince1970 * 1000, "data": data]
+        logs.append(payload)
         while logs.count > maxEvents { logs.removeFirst() }
         if let json = try? JSONSerialization.data(withJSONObject: logs) {
             storage.write(DevGuardConstants.usageLogsKey, String(data: json, encoding: .utf8) ?? "[]")
         }
+        outbox?.enqueue(kind: "usage", payload: payload)
     }
 
     func getLogs() -> [[String: Any]] {
@@ -114,7 +121,10 @@ final class UsageLogger {
         return arr
     }
 
-    func clearLogs() { storage.delete(DevGuardConstants.usageLogsKey) }
+    func clearLogs() {
+        storage.delete(DevGuardConstants.usageLogsKey)
+        outbox?.clearAckedOnly()
+    }
 }
 
 final class HardwareService {
@@ -178,10 +188,10 @@ final class HardwareService {
             email: storage.read(DevGuardConstants.emailKey),
             phone: storage.read(DevGuardConstants.phoneKey),
             customData: customData,
-            battery: advancedTelemetry ? "\(Int(device.batteryLevel * 100))%" : nil,
-            ram: advancedTelemetry ? "\(NativeBridge.getTotalRamMb()) MB" : nil,
-            storage: nil,
-            networkType: nil,
+            battery: advancedTelemetry ? getBatteryLevel() : nil,
+            ram: advancedTelemetry ? getRam() : nil,
+            storage: advancedTelemetry ? getStorage() : nil,
+            networkType: advancedTelemetry ? getNetworkType() : nil,
             usageLogs: (!isHeartbeat && forceLogs) ? usageLogger.getLogs() : nil,
             userLogs: (!isHeartbeat && userJourneyEnabled) ? userLogBuffer.getLogs() : nil,
             deviceToken: tokenService.getToken(),
@@ -191,6 +201,47 @@ final class HardwareService {
             hostPlatform: "ios",
             hostPlatformVersion: device.systemVersion
         )
+    }
+
+    private func getBatteryLevel() -> String? {
+        let device = UIDevice.current
+        let prev = device.isBatteryMonitoringEnabled
+        device.isBatteryMonitoringEnabled = true
+        defer { device.isBatteryMonitoringEnabled = prev }
+        let level = device.batteryLevel
+        if level >= 0 {
+            return "\(Int(round(level * 100)))%"
+        }
+        return nil
+    }
+
+    private func getRam() -> String? {
+        let mb = NativeBridge.getTotalRamMb()
+        if mb > 0 {
+            let gb = Double(mb) / 1024.0
+            return String(format: "%.1f GB", gb)
+        }
+        let physicalBytes = ProcessInfo.processInfo.physicalMemory
+        if physicalBytes > 0 {
+            let gb = Double(physicalBytes) / (1024.0 * 1024.0 * 1024.0)
+            return String(format: "%.1f GB", gb)
+        }
+        return nil
+    }
+
+    private func getStorage() -> String? {
+        do {
+            let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+            if let total = attrs[.systemSize] as? NSNumber {
+                let gb = Double(truncating: total) / (1024.0 * 1024.0 * 1024.0)
+                return String(format: "%.1f GB Total", gb)
+            }
+        } catch {}
+        return nil
+    }
+
+    private func getNetworkType() -> String? {
+        return "wifi"
     }
 
     func isDeviceCompromised() -> Bool {
@@ -268,9 +319,13 @@ final class SyncPolicyService {
 enum GuardEnforcement {
     static func apply(_ response: GuardResponse, metadata: DeviceMetadata, isCompromised: Bool = false) -> GuardResponse {
         if isCompromised {
-            let code = NativeBridge.evaluatePolicy(blockEmulators: false, isPhysical: metadata.isPhysicalDevice, isCompromised: true)
-            if code == PolicyLock.compromised {
-                return response.copyWith(status: .locked, title: "Security Alert", message: "This device appears to be compromised. Access is restricted for your protection.")
+            if response.rootPolicy == "block" {
+                let code = NativeBridge.evaluatePolicy(blockEmulators: false, isPhysical: metadata.isPhysicalDevice, isCompromised: true)
+                if code == PolicyLock.compromised {
+                    return response.copyWith(status: .locked, title: "Security Alert", message: "This device appears to be compromised. Access is restricted for your protection.")
+                }
+            } else if response.status != .locked {
+                return response.copyWith(status: .warning, title: "Security Alert", message: "This device appears to be compromised. Access is restricted for your protection.")
             }
         }
         let code = NativeBridge.evaluatePolicy(
@@ -350,8 +405,18 @@ final class RestClient {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            guard let http = response as? HTTPURLResponse else {
                 return StatusFetchResult(response: nil, failure: .networkError)
+            }
+            guard http.statusCode == 200 else {
+                let retryAfter = http.statusCode == 429
+                    ? RetryAfter.parseSeconds(http.value(forHTTPHeaderField: "Retry-After"))
+                    : nil
+                return StatusFetchResult(
+                    response: nil,
+                    failure: .networkError,
+                    retryAfterSeconds: retryAfter
+                )
             }
             let responseBody = String(data: data, encoding: .utf8) ?? ""
             guard let serverSig = http.value(forHTTPHeaderField: DevGuardConstants.respSig) else {
@@ -400,7 +465,7 @@ final class RestClient {
             let body = String(data: data, encoding: .utf8) ?? ""
             guard let serverSig = http.value(forHTTPHeaderField: DevGuardConstants.respSig),
                   NativeBridge.verifyResponse(responseBody: body, signature: serverSig) else { return false }
-            return body.trimmingCharacters(in: .whitespacesAndNewlines) == "unlocked"
+            return body.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "unlocked"
         } catch {
             return false
         }
@@ -414,13 +479,22 @@ final class RemoteWipeService {
     private let userLogBuffer: UserLogBuffer
     private let storage: SecureStorageService
     private let tokenService: DeviceTokenService
+    private let outbox: DiagnosticOutbox?
 
-    init(cache: CacheService, usageLogger: UsageLogger, userLogBuffer: UserLogBuffer, storage: SecureStorageService, tokenService: DeviceTokenService) {
+    init(
+        cache: CacheService,
+        usageLogger: UsageLogger,
+        userLogBuffer: UserLogBuffer,
+        storage: SecureStorageService,
+        tokenService: DeviceTokenService,
+        outbox: DiagnosticOutbox? = nil
+    ) {
         self.cache = cache
         self.usageLogger = usageLogger
         self.userLogBuffer = userLogBuffer
         self.storage = storage
         self.tokenService = tokenService
+        self.outbox = outbox
     }
 
     func execute(revokeToken: Bool = false) {
@@ -428,6 +502,7 @@ final class RemoteWipeService {
         usageLogger.clearLogs()
         userLogBuffer.clearLogs()
         storage.deleteAllDeviceUserKeys()
+        outbox?.clearAll()
         if revokeToken { tokenService.clearToken() }
     }
 }

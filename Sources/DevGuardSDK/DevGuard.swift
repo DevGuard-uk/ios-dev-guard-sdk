@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import CrashReporter
 
 @objc public final class DevGuard: NSObject {
     @objc public enum FailSafe: Int {
@@ -14,16 +15,22 @@ import UIKit
     private var failSafe: FailSafe = .open
 
     private let storage = SecureStorageService()
+    private let outbox = DiagnosticOutbox.shared
+    private lazy var batchService = DiagnosticBatchService.shared
     private lazy var cacheService = CacheService(storage: storage, projectId: projectId)
     private lazy var tokenService = DeviceTokenService(storage: storage)
-    private lazy var usageLogger = UsageLogger(storage: storage)
+    private lazy var usageLogger = UsageLogger(storage: storage, outbox: outbox)
     private lazy var userLogBuffer = UserLogBuffer(storage: storage)
     private lazy var syncPolicy = SyncPolicyService(storage: storage)
     private var restClient: RestClient?
+    /// Strong ref — `PluginCrashReporter` holds the sink weakly.
+    private var crashSink: DevGuardCrashSink?
 
     private var heartbeatTimer: Timer?
     private var heartbeatPaused = false
     private var previewModeLocked = false
+    /// Epoch ms until which sync/heartbeat must defer after a 429 Retry-After.
+    private var rateLimitUntilMs: Int64 = 0
     private var shieldWindow: UIWindow?
 
     public private(set) var currentResponse: GuardResponse?
@@ -51,21 +58,37 @@ import UIKit
     @objc public func initialize(
         projectId: String,
         secret: String,
+        sdkKey: String? = nil,
         failSafe: FailSafe = .open,
         statusUrl: String? = nil
     ) {
+        let authSecret = (sdkKey?.isEmpty == false) ? sdkKey! : secret
         self.projectId = projectId
-        self.secret = secret
+        self.secret = authSecret
         self.failSafe = failSafe
         guard let effectiveUrl = try? StatusUrlResolver.resolve(statusUrl) else { return }
         self.statusUrl = effectiveUrl
-        self.restClient = RestClient(baseUrl: effectiveUrl, secret: secret)
+        self.restClient = RestClient(baseUrl: effectiveUrl, secret: authSecret)
 
-        PluginCrashReporter.configure(
+        DiagnosticBatchService.shared.configure(
             projectId: projectId,
-            secret: secret,
+            secret: authSecret,
             baseUrl: effectiveUrl,
-            metadataProvider: { [weak self] in
+            deviceIdProvider: { [weak self] in self?.tokenService.getToken() ?? "" },
+            outbox: outbox
+        )
+
+        let sink = crashSink ?? DevGuardCrashSink(
+            projectId: projectId,
+            secret: authSecret,
+            baseUrl: effectiveUrl,
+            outbox: outbox
+        )
+        sink.update(projectId: projectId, secret: authSecret, baseUrl: effectiveUrl, outbox: outbox)
+        crashSink = sink
+        PluginCrashReporter.configure(
+            sink: sink,
+            extrasProvider: { [weak self] in
                 guard let self else { return [:] }
                 let hardware = HardwareService(
                     storage: self.storage,
@@ -74,7 +97,7 @@ import UIKit
                     userLogBuffer: self.userLogBuffer,
                     cachedResponse: self.currentResponse
                 )
-                return hardware.collect().toPayloadMap()
+                return Self.crashExtras(from: hardware.collect().toPayloadMap())
             }
         )
 
@@ -203,41 +226,38 @@ import UIKit
         let cache = CacheService(storage: storage, projectId: projectId)
         let hardware = HardwareService(storage: storage, tokenService: tokenService, usageLogger: usageLogger, userLogBuffer: userLogBuffer, cachedResponse: currentResponse)
 
-        if hardware.isDeviceCompromised() {
-            let code = NativeBridge.evaluatePolicy(blockEmulators: false, isPhysical: true, isCompromised: true)
-            if code == PolicyLock.compromised {
-                updateResponse(GuardResponse(
-                    status: .locked,
-                    title: "Security Alert",
-                    message: "This device appears to be compromised. Access is restricted.",
-                    contactEmail: "", contactPhone: "", contactWhatsapp: "",
-                    allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
-                    remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                    syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
-                ))
-                return
-            }
-        }
-
+        // rootPolicy default warn — defer lock vs warn to GuardEnforcement after cache/heartbeat.
+        let compromisedEarly = hardware.isDeviceCompromised()
+        let base: GuardResponse
         if let cached = cache.getResponse() {
-            updateResponse(cached)
+            base = cached
         } else if failSafe == .closed {
-            updateResponse(GuardResponse(
+            base = GuardResponse(
                 status: .pending, title: nil, message: "Connecting to security server...",
                 contactEmail: "", contactPhone: "", contactWhatsapp: "",
                 allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
                 remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
-            ))
+                syncPolicy: "immediate", blockEmulators: false, rootPolicy: "warn",
+                diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
+            )
         } else {
-            updateResponse(GuardResponse(
+            base = GuardResponse(
                 status: .active, title: nil, message: "",
                 contactEmail: "", contactPhone: "", contactWhatsapp: "",
                 allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
                 remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
-            ))
+                syncPolicy: "immediate", blockEmulators: false, rootPolicy: "warn",
+                diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
+            )
         }
+        let earlyMeta = DeviceMetadata(
+            deviceId: "pending", deviceName: nil, model: nil, brand: nil, os: nil,
+            appVersion: nil, isPhysicalDevice: true, username: nil, email: nil, phone: nil,
+            customData: nil, battery: nil, ram: nil, storage: nil, networkType: nil,
+            usageLogs: nil, userLogs: nil, deviceToken: nil, fingerprint: nil,
+            sdkRuntime: nil, sdkVersion: nil, hostPlatform: nil, hostPlatformVersion: nil
+        )
+        updateResponse(GuardEnforcement.apply(base, metadata: earlyMeta, isCompromised: compromisedEarly))
 
         usageLogger.logEvent("app_open")
         await syncStatus(trigger: "appLaunch")
@@ -247,6 +267,10 @@ import UIKit
     private func syncStatus(force: Bool = false, forceLogs: Bool = false, trigger: String? = nil) async {
         if previewModeLocked { return }
         guard let projectId, let restClient else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        if nowMs < rateLimitUntilMs {
+            return
+        }
         if !force && !syncPolicy.shouldSync(cachedResponse: currentResponse, forceLogs: forceLogs, trigger: trigger) {
             return
         }
@@ -268,12 +292,21 @@ import UIKit
                 contactEmail: "", contactPhone: "", contactWhatsapp: "",
                 allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
                 remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-                syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
+                syncPolicy: "immediate", blockEmulators: false, rootPolicy: "warn",
+                diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
             ))
             return
         }
 
-        guard let fresh = result.response else { return }
+        guard let fresh = result.response else {
+            if let retryAfter = result.retryAfterSeconds, retryAfter >= 1 {
+                let clamped = min(retryAfter, 60)
+                rateLimitUntilMs = Int64(Date().timeIntervalSince1970 * 1000) + Int64(clamped) * 1000
+            }
+            return
+        }
+
+        rateLimitUntilMs = 0
         await handleRemoteCommand(fresh.remoteCommand)
         if let token = fresh.deviceToken { tokenService.saveToken(token) }
 
@@ -282,21 +315,34 @@ import UIKit
         CacheService(storage: storage, projectId: projectId).saveResponse(enforced)
         syncPolicy.recordSuccessfulSync()
 
-        if metadata.usageLogs?.isEmpty == false { usageLogger.clearLogs() }
+        outbox.purgeExpiredAcked(retentionHours: 48)
         if metadata.userLogs?.isEmpty == false { userLogBuffer.clearLogs() }
     }
 
     private func handleRemoteCommand(_ command: String?) async {
         guard let command, command != "none" else { return }
         switch command {
-        case "syncLogs": await syncStatus(force: true, forceLogs: true)
+        case "syncLogs":
+            _ = await DiagnosticBatchService.shared.flush()
+            await syncStatus(force: true, forceLogs: true)
         case "clearLogs":
+            _ = await DiagnosticBatchService.shared.flush()
+            outbox.clearAckedOnly()
             usageLogger.clearLogs()
             userLogBuffer.clearLogs()
         case "wipeCache": CacheService(storage: storage, projectId: projectId).clear()
         case "revokeToken": tokenService.clearToken()
         default: break
         }
+    }
+
+    @discardableResult
+    public func flushDiagnosticOutbox() async -> DiagnosticBatchResult {
+        await DiagnosticBatchService.shared.flush()
+    }
+
+    public var diagnosticOutbox: DiagnosticOutbox {
+        outbox
     }
 
     private func startHeartbeat() {
@@ -362,11 +408,32 @@ import UIKit
         let cache = CacheService(storage: storage, projectId: projectId)
         let last = cache.getLastWipeNonce()
         if let last, nonce <= last { return }
-        RemoteWipeService(cache: cache, usageLogger: usageLogger, userLogBuffer: userLogBuffer, storage: storage, tokenService: tokenService).execute()
+        RemoteWipeService(cache: cache, usageLogger: usageLogger, userLogBuffer: userLogBuffer, storage: storage, tokenService: tokenService, outbox: outbox).execute()
         cache.setLastWipeNonce(nonce)
     }
 
     private func sha256(_ input: String) -> String {
         NativeBridge.hashSha256Hex(input)
+    }
+
+    /// Flatten hardware payload into string extras for [CrashReport] / sink upload.
+    private static func crashExtras(from map: [String: Any]) -> [String: String] {
+        var extras: [String: String] = [:]
+        for (key, value) in map {
+            switch value {
+            case let s as String:
+                extras[key] = s
+            case let b as Bool:
+                extras[key] = b ? "true" : "false"
+            case let n as NSNumber:
+                extras[key] = n.stringValue
+            default:
+                break
+            }
+        }
+        if let version = extras["version"], extras["appVersion"] == nil {
+            extras["appVersion"] = version
+        }
+        return extras
     }
 }

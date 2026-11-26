@@ -21,12 +21,11 @@ final class DevGuardShieldPresenter {
         switch status {
         case .locked, .expired:
             showFullScreen(on: window, view: PremiumLockScreenView(response: response ?? emptyResponse(status), status: status))
-        case .pending:
-            showFullScreen(on: window, view: PendingScreenView(message: response?.message ?? ""))
+        // PENDING is host-owned (SPEC) — do not paint a plugin connecting spinner.
+        case .pending, .active:
+            break
         case .warning:
             showBanner(on: window, view: WarningBannerView(title: response?.title, message: response?.message ?? ""))
-        case .active:
-            break
         }
 
         if response?.betaFeatures["showDiagnosticLogs"] as? Bool == true,
@@ -136,7 +135,8 @@ final class DevGuardShieldPresenter {
             contactEmail: "", contactPhone: "", contactWhatsapp: "",
             allowUnlock: false, betaFeatures: [:], extraData: [:], lifecycleSync: nil,
             remoteCommand: nil, deviceToken: nil, pingInterval: 5,
-            syncPolicy: "immediate", blockEmulators: false, diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
+            syncPolicy: "immediate", blockEmulators: false, rootPolicy: "warn",
+            diagnosticPasscodeHash: nil, branding: nil, wipeNonce: nil
         )
     }
 }

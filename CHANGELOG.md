@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Root / jailbreak policy** (`rootPolicy`): heartbeat-driven `warn` (default banner) or `block` (lock) when the device is compromised. Emulator blocking via project settings is unchanged.
 - **User Journey** (`DevGuard.shared.setUserLog`): optional compact UI-step trail for Developer Portal and Console. Uploaded on heartbeat only when the project plan includes User Journey.
 
 ## [1.0.0] - 2026-06-26

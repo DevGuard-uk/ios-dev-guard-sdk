@@ -55,6 +55,8 @@ public struct GuardResponse {
     public let pingInterval: Int
     public let syncPolicy: String
     public let blockEmulators: Bool
+    /// Root/jailbreak policy from heartbeat: `warn` (default) or `block`.
+    public let rootPolicy: String
     public let diagnosticPasscodeHash: String?
     public let branding: LockScreenBranding?
     public let wipeNonce: Int?
@@ -76,6 +78,7 @@ public struct GuardResponse {
             pingInterval: pingInterval,
             syncPolicy: syncPolicy,
             blockEmulators: blockEmulators,
+            rootPolicy: rootPolicy,
             diagnosticPasscodeHash: diagnosticPasscodeHash,
             branding: branding,
             wipeNonce: wipeNonce
@@ -95,6 +98,7 @@ public struct GuardResponse {
             "pingInterval": pingInterval,
             "syncPolicy": syncPolicy,
             "blockEmulators": blockEmulators,
+            "rootPolicy": rootPolicy,
             "diagnosticPasscodeHash": diagnosticPasscodeHash as Any,
         ]
         if let title { dict["title"] = title }
@@ -133,6 +137,7 @@ public struct GuardResponse {
             pingInterval: max(ping, 1),
             syncPolicy: dict["syncPolicy"] as? String ?? "immediate",
             blockEmulators: dict["blockEmulators"] as? Bool ?? false,
+            rootPolicy: (dict["rootPolicy"] as? String) == "block" ? "block" : "warn",
             diagnosticPasscodeHash: dict["diagnosticPasscodeHash"] as? String,
             branding: LockScreenBranding.fromDict(dict["branding"] as? [String: Any]),
             wipeNonce: (dict["wipeNonce"] as? NSNumber)?.intValue
@@ -206,6 +211,14 @@ enum StatusFetchFailure {
 struct StatusFetchResult {
     let response: GuardResponse?
     let failure: StatusFetchFailure
+    /// Clamped Retry-After seconds when the server returned 429 (1–60), else nil.
+    let retryAfterSeconds: Int?
+
+    init(response: GuardResponse?, failure: StatusFetchFailure, retryAfterSeconds: Int? = nil) {
+        self.response = response
+        self.failure = failure
+        self.retryAfterSeconds = retryAfterSeconds
+    }
 
     var isSignatureMismatch: Bool { failure == .signatureMismatch }
 }
